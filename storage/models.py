@@ -1,0 +1,1 @@
+# Model definitions (not needed for raw SQL, but keep for clarity)
