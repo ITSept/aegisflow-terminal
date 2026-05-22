@@ -1,57 +1,86 @@
+# paper_trading/executor.py
 """
-Executor otomatis berdasarkan sinyal dari signal_engine.
-Membeli saat sinyal BULLISH/STRONG BULLISH, menjual saat BEARISH/STRONG BEARISH.
+Paper trading executor with automatic buy/sell decisions based on signal engine.
+Logs every order, balance changes, and errors.
 """
 
 import asyncio
 import logging
-from datetime import datetime
 from typing import Optional
 
 from paper_trading.account import VirtualAccount
 from paper_trading.config import INITIAL_BALANCE_USDT, COMMISSION_RATE
+from utils.logger import setup_logger
 
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__)
+
 
 class PaperTradingExecutor:
     def __init__(self, initial_balance: float = INITIAL_BALANCE_USDT):
         self.account = VirtualAccount(initial_balance, COMMISSION_RATE)
-        self.last_signal = None
-        self.last_price = 0.0
-        self.is_in_position = False
+        self.last_signal: Optional[str] = None
+        self.last_price: float = 0.0
+        self.is_in_position: bool = False
+        logger.info(
+            f"PaperTradingExecutor initialized: balance={initial_balance:.2f} USDT, "
+            f"commission={COMMISSION_RATE*100:.2f}%"
+        )
 
-    async def on_signal(self, signal: str, score: float, price: float):
-        """Dipanggil setiap ada update sinyal (bisa dari periodic check)."""
+    async def on_signal(self, signal: str, score: float, price: float) -> None:
+        """
+        Called whenever a new signal is available.
+        Implements simple strategy: buy on BULLISH/STRONG_BULLISH when flat,
+        sell on BEARISH/STRONG_BEARISH when in position.
+        """
         self.last_price = price
         current_signal = signal.upper()
 
-        # Update current price untuk posisi yang ada
+        # Update current price for open positions (for unrealized PnL display)
         if self.account.positions:
             for pos in self.account.positions:
                 pos.current_price = price
 
-        # Cek apakah sudah punya posisi
         has_position = len(self.account.positions) > 0
 
-        # Buy signal (Bullish atau Strong Bullish)
+        # Buy signal
         if "BULLISH" in current_signal and not has_position:
-            # Tentukan quantity berdasarkan risk (misal 20% dari balance)
-            risk_ratio = 0.2
+            risk_ratio = 0.2  # use 20% of available balance
             quantity = (self.account.balance_usdt * risk_ratio) / price
             if quantity > 0:
-                self.account.buy(price, quantity)
-                self.is_in_position = True
+                success = self.account.buy(price, quantity)
+                if success:
+                    self.is_in_position = True
+                    logger.info(
+                        f"BUY order executed: signal={current_signal}, score={score:.4f}, "
+                        f"price={price:.2f}, qty={quantity:.4f}, balance={self.account.balance_usdt:.2f}"
+                    )
+                else:
+                    logger.warning(f"BUY order failed: insufficient balance or other error")
+            else:
+                logger.warning(f"BUY order skipped: quantity={quantity} (too small)")
 
-        # Sell signal (Bearish atau Strong Bearish) – close posisi
+        # Sell signal (close position)
         elif "BEARISH" in current_signal and has_position:
-            # Close full position
             pos = self.account.positions[0] if self.account.positions else None
             if pos:
-                self.account.sell(price, pos.quantity)
-                self.is_in_position = False
+                qty = pos.quantity
+                success = self.account.sell(price, qty)
+                if success:
+                    self.is_in_position = False
+                    logger.info(
+                        f"SELL order executed: signal={current_signal}, score={score:.4f}, "
+                        f"price={price:.2f}, qty={qty:.4f}, balance={self.account.balance_usdt:.2f}, "
+                        f"PnL={self.account.total_pnl:.2f}"
+                    )
+                else:
+                    logger.warning(f"SELL order failed (no open position?)")
+            else:
+                logger.warning("SELL signal but no open position found")
 
-        # Jika netral, tidak lakukan apa-apa
+        # Neutral: no action
 
     def get_status(self) -> dict:
-        """Ambil status akun virtual."""
-        return self.account.get_status()
+        """Return current virtual account status."""
+        status = self.account.get_status()
+        logger.debug(f"Status fetched: balance={status['balance']:.2f}, PnL={status['total_pnl']:.2f}")
+        return status
